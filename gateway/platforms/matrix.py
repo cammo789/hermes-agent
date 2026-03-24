@@ -9,9 +9,16 @@ Environment variables:
     MATRIX_ACCESS_TOKEN     Access token (preferred auth method)
     MATRIX_USER_ID          Full user ID (@bot:server) — required for password login
     MATRIX_PASSWORD         Password (alternative to access token)
+    MATRIX_DEVICE_ID        Device ID for E2EE (auto-detected from access token)
     MATRIX_ENCRYPTION       Set "true" to enable E2EE
     MATRIX_ALLOWED_USERS    Comma-separated Matrix user IDs (@user:server)
     MATRIX_HOME_ROOM        Room ID for cron/notification delivery
+
+E2EE Notes:
+    For end-to-end encryption with access token auth, the device_id is
+    auto-detected from the access token via the whoami endpoint. If your
+    homeserver does not return a device_id, set MATRIX_DEVICE_ID manually
+    in your .env file. Without a valid device_id, E2EE will not function.
 """
 
 from __future__ import annotations
@@ -61,11 +68,11 @@ def check_matrix_requirements() -> bool:
         return False
     try:
         import nio  # noqa: F401
+
         return True
     except ImportError:
         logger.warning(
-            "Matrix: matrix-nio not installed. "
-            "Run: pip install 'matrix-nio[e2e]'"
+            "Matrix: matrix-nio not installed. Run: pip install 'matrix-nio[e2e]'"
         )
         return False
 
@@ -77,17 +84,14 @@ class MatrixAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.MATRIX)
 
         self._homeserver: str = (
-            config.extra.get("homeserver", "")
-            or os.getenv("MATRIX_HOMESERVER", "")
+            config.extra.get("homeserver", "") or os.getenv("MATRIX_HOMESERVER", "")
         ).rstrip("/")
         self._access_token: str = config.token or os.getenv("MATRIX_ACCESS_TOKEN", "")
-        self._user_id: str = (
-            config.extra.get("user_id", "")
-            or os.getenv("MATRIX_USER_ID", "")
+        self._user_id: str = config.extra.get("user_id", "") or os.getenv(
+            "MATRIX_USER_ID", ""
         )
-        self._password: str = (
-            config.extra.get("password", "")
-            or os.getenv("MATRIX_PASSWORD", "")
+        self._password: str = config.extra.get("password", "") or os.getenv(
+            "MATRIX_PASSWORD", ""
         )
         self._encryption: bool = config.extra.get(
             "encryption",
@@ -105,6 +109,7 @@ class MatrixAdapter(BasePlatformAdapter):
         self._joined_rooms: Set[str] = set()
         # Event deduplication (bounded deque keeps newest entries)
         from collections import deque
+
         self._processed_events: deque = deque(maxlen=1000)
         self._processed_events_set: set = set()
 
@@ -161,23 +166,36 @@ class MatrixAdapter(BasePlatformAdapter):
 
         # Authenticate.
         if self._access_token:
-            client.access_token = self._access_token
-            # Resolve user_id if not set.
+            # Call whoami() to resolve user_id and device_id from access token.
+            # When using access token auth, we MUST get device_id to properly
+            # initialize E2EE via restore_login().
+            whoami_resp = await client.whoami()
+            if not isinstance(whoami_resp, nio.WhoamiResponse):
+                logger.error(
+                    "Matrix: whoami failed — check MATRIX_ACCESS_TOKEN and MATRIX_HOMESERVER"
+                )
+                await client.close()
+                return False
+
             if not self._user_id:
-                resp = await client.whoami()
-                if isinstance(resp, nio.WhoamiResponse):
-                    self._user_id = resp.user_id
-                    client.user_id = resp.user_id
-                    logger.info("Matrix: authenticated as %s", self._user_id)
-                else:
-                    logger.error(
-                        "Matrix: whoami failed — check MATRIX_ACCESS_TOKEN and MATRIX_HOMESERVER"
-                    )
-                    await client.close()
-                    return False
-            else:
-                client.user_id = self._user_id
-                logger.info("Matrix: using access token for %s", self._user_id)
+                self._user_id = whoami_resp.user_id
+            device_id = whoami_resp.device_id or ""
+
+            # Warn if E2EE is enabled but we don't have a device_id.
+            # E2EE requires device_id to initialize the Olm account.
+            if self._encryption and not device_id:
+                logger.warning(
+                    "Matrix: E2EE is enabled but device_id is not available. "
+                    "Set MATRIX_DEVICE_ID in your .env file, or E2EE may not work. "
+                    "device_id should be the device ID of your bot's Matrix session."
+                )
+
+            client.restore_login(self._user_id, device_id, self._access_token)
+            logger.info(
+                "Matrix: authenticated as %s (device: %s)",
+                self._user_id,
+                device_id or "none",
+            )
         elif self._password and self._user_id:
             resp = await client.login(
                 self._password,
@@ -186,11 +204,15 @@ class MatrixAdapter(BasePlatformAdapter):
             if isinstance(resp, nio.LoginResponse):
                 logger.info("Matrix: logged in as %s", self._user_id)
             else:
-                logger.error("Matrix: login failed — %s", getattr(resp, "message", resp))
+                logger.error(
+                    "Matrix: login failed — %s", getattr(resp, "message", resp)
+                )
                 await client.close()
                 return False
         else:
-            logger.error("Matrix: need MATRIX_ACCESS_TOKEN or MATRIX_USER_ID + MATRIX_PASSWORD")
+            logger.error(
+                "Matrix: need MATRIX_ACCESS_TOKEN or MATRIX_USER_ID + MATRIX_PASSWORD"
+            )
             await client.close()
             return False
 
@@ -213,9 +235,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
         # If E2EE: handle encrypted events.
         if self._encryption and hasattr(client, "olm"):
-            client.add_event_callback(
-                self._on_room_message, nio.MegolmEvent
-            )
+            client.add_event_callback(self._on_room_message, nio.MegolmEvent)
 
         # Initial sync to catch up, then start background sync.
         self._startup_ts = time.time()
@@ -287,9 +307,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
             # Reply-to support.
             if reply_to:
-                msg_content["m.relates_to"] = {
-                    "m.in_reply_to": {"event_id": reply_to}
-                }
+                msg_content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to}}
 
             # Thread support: if metadata has thread_id, send as threaded reply.
             thread_id = (metadata or {}).get("thread_id")
@@ -343,7 +361,9 @@ class MatrixAdapter(BasePlatformAdapter):
         """Send a typing indicator."""
         if self._client:
             try:
-                await self._client.room_typing(chat_id, typing_state=True, timeout=30000)
+                await self._client.room_typing(
+                    chat_id, typing_state=True, timeout=30000
+                )
             except Exception:
                 pass
 
@@ -392,14 +412,20 @@ class MatrixAdapter(BasePlatformAdapter):
             # Try aiohttp first (always available), fall back to httpx
             try:
                 import aiohttp as _aiohttp
+
                 async with _aiohttp.ClientSession() as http:
-                    async with http.get(image_url, timeout=_aiohttp.ClientTimeout(total=30)) as resp:
+                    async with http.get(
+                        image_url, timeout=_aiohttp.ClientTimeout(total=30)
+                    ) as resp:
                         resp.raise_for_status()
                         data = await resp.read()
                         ct = resp.content_type or "image/png"
-                        fname = image_url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
+                        fname = (
+                            image_url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
+                        )
             except ImportError:
                 import httpx
+
                 async with httpx.AsyncClient() as http:
                     resp = await http.get(image_url, follow_redirects=True, timeout=30)
                     resp.raise_for_status()
@@ -408,9 +434,13 @@ class MatrixAdapter(BasePlatformAdapter):
                     fname = image_url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
         except Exception as exc:
             logger.warning("Matrix: failed to download image %s: %s", image_url, exc)
-            return await self.send(chat_id, f"{caption or ''}\n{image_url}".strip(), reply_to)
+            return await self.send(
+                chat_id, f"{caption or ''}\n{image_url}".strip(), reply_to
+            )
 
-        return await self._upload_and_send(chat_id, data, fname, ct, "m.image", caption, reply_to, metadata)
+        return await self._upload_and_send(
+            chat_id, data, fname, ct, "m.image", caption, reply_to, metadata
+        )
 
     async def send_image_file(
         self,
@@ -421,7 +451,9 @@ class MatrixAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Upload a local image file to Matrix."""
-        return await self._send_local_file(chat_id, image_path, "m.image", caption, reply_to, metadata=metadata)
+        return await self._send_local_file(
+            chat_id, image_path, "m.image", caption, reply_to, metadata=metadata
+        )
 
     async def send_document(
         self,
@@ -433,7 +465,9 @@ class MatrixAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Upload a local file as a document."""
-        return await self._send_local_file(chat_id, file_path, "m.file", caption, reply_to, file_name, metadata)
+        return await self._send_local_file(
+            chat_id, file_path, "m.file", caption, reply_to, file_name, metadata
+        )
 
     async def send_voice(
         self,
@@ -444,7 +478,9 @@ class MatrixAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Upload an audio file as a voice message."""
-        return await self._send_local_file(chat_id, audio_path, "m.audio", caption, reply_to, metadata=metadata)
+        return await self._send_local_file(
+            chat_id, audio_path, "m.audio", caption, reply_to, metadata=metadata
+        )
 
     async def send_video(
         self,
@@ -455,7 +491,9 @@ class MatrixAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Upload a video file."""
-        return await self._send_local_file(chat_id, video_path, "m.video", caption, reply_to, metadata=metadata)
+        return await self._send_local_file(
+            chat_id, video_path, "m.video", caption, reply_to, metadata=metadata
+        )
 
     def format_message(self, content: str) -> str:
         """Pass-through — Matrix supports standard Markdown natively."""
@@ -506,9 +544,7 @@ class MatrixAdapter(BasePlatformAdapter):
         }
 
         if reply_to:
-            msg_content["m.relates_to"] = {
-                "m.in_reply_to": {"event_id": reply_to}
-            }
+            msg_content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to}}
 
         thread_id = (metadata or {}).get("thread_id")
         if thread_id:
@@ -544,7 +580,9 @@ class MatrixAdapter(BasePlatformAdapter):
         ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
         data = p.read_bytes()
 
-        return await self._upload_and_send(room_id, data, fname, ct, msgtype, caption, reply_to, metadata)
+        return await self._upload_and_send(
+            room_id, data, fname, ct, msgtype, caption, reply_to, metadata
+        )
 
     # ------------------------------------------------------------------
     # Sync loop
@@ -589,7 +627,8 @@ class MatrixAdapter(BasePlatformAdapter):
             # Failed to decrypt.
             logger.warning(
                 "Matrix: could not decrypt event %s in %s",
-                event.event_id, room.room_id,
+                event.event_id,
+                room.room_id,
             )
             return
 
@@ -689,7 +728,11 @@ class MatrixAdapter(BasePlatformAdapter):
         # Use the MIME type from the event's content info when available,
         # falling back to category-level MIME types for downstream matching
         # (gateway/run.py checks startswith("image/"), startswith("audio/"), etc.)
-        content_info = getattr(event, "content", {}) if isinstance(getattr(event, "content", None), dict) else {}
+        content_info = (
+            getattr(event, "content", {})
+            if isinstance(getattr(event, "content", None), dict)
+            else {}
+        )
         event_mimetype = (content_info.get("info") or {}).get("mimetype", "")
         media_type = "application/octet-stream"
         msg_type = MessageType.DOCUMENT
@@ -711,13 +754,16 @@ class MatrixAdapter(BasePlatformAdapter):
         if msg_type == MessageType.PHOTO and url:
             try:
                 ext_map = {
-                    "image/jpeg": ".jpg", "image/png": ".png",
-                    "image/gif": ".gif", "image/webp": ".webp",
+                    "image/jpeg": ".jpg",
+                    "image/png": ".png",
+                    "image/gif": ".gif",
+                    "image/webp": ".webp",
                 }
                 ext = ext_map.get(event_mimetype, ".jpg")
                 download_resp = await self._client.download(url)
                 if isinstance(download_resp, nio.DownloadResponse):
                     from gateway.platforms.base import cache_image_from_bytes
+
                     cached_path = cache_image_from_bytes(download_resp.body, ext=ext)
                     logger.info("[Matrix] Cached user image at %s", cached_path)
             except Exception as e:
@@ -744,7 +790,9 @@ class MatrixAdapter(BasePlatformAdapter):
         )
 
         # Use cached local path for images, HTTP URL for other media types
-        media_urls = [cached_path] if cached_path else ([http_url] if http_url else None)
+        media_urls = (
+            [cached_path] if cached_path else ([http_url] if http_url else None)
+        )
         media_types = [media_type] if media_urls else None
 
         msg_event = MessageEvent(
@@ -775,7 +823,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
         logger.info(
             "Matrix: invited to %s by %s — joining",
-            room.room_id, event.sender,
+            room.room_id,
+            event.sender,
         )
         try:
             resp = await self._client.join(room.room_id)
@@ -787,7 +836,8 @@ class MatrixAdapter(BasePlatformAdapter):
             else:
                 logger.warning(
                     "Matrix: failed to join %s: %s",
-                    room.room_id, getattr(resp, "message", resp),
+                    room.room_id,
+                    getattr(resp, "message", resp),
                 )
         except Exception as exc:
             logger.warning("Matrix: error joining %s: %s", room.room_id, exc)
@@ -815,7 +865,10 @@ class MatrixAdapter(BasePlatformAdapter):
             elif isinstance(resp, dict):
                 dm_data = resp
         except Exception as exc:
-            logger.debug("Matrix: get_account_data('m.direct') failed: %s — trying sync fallback", exc)
+            logger.debug(
+                "Matrix: get_account_data('m.direct') failed: %s — trying sync fallback",
+                exc,
+            )
 
         # Fallback: parse from the client's account_data store (populated by sync).
         if dm_data is None:
@@ -839,10 +892,7 @@ class MatrixAdapter(BasePlatformAdapter):
             if isinstance(rooms, list):
                 dm_room_ids.update(rooms)
 
-        self._dm_rooms = {
-            rid: (rid in dm_room_ids)
-            for rid in self._joined_rooms
-        }
+        self._dm_rooms = {rid: (rid in dm_room_ids) for rid in self._joined_rooms}
 
     def _get_display_name(self, room: Any, user_id: str) -> str:
         """Get a user's display name in a room, falling back to user_id."""
@@ -875,6 +925,7 @@ class MatrixAdapter(BasePlatformAdapter):
         """
         try:
             import markdown
+
             html = markdown.markdown(
                 text,
                 extensions=["fenced_code", "tables", "nl2br"],

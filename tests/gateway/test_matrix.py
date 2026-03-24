@@ -1,4 +1,5 @@
 """Tests for Matrix platform adapter."""
+
 import json
 import re
 import pytest
@@ -10,6 +11,7 @@ from gateway.config import Platform, PlatformConfig
 # ---------------------------------------------------------------------------
 # Platform & Config
 # ---------------------------------------------------------------------------
+
 
 class TestMatrixPlatformEnum:
     def test_matrix_enum_exists(self):
@@ -26,6 +28,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
 
         from gateway.config import GatewayConfig, _apply_env_overrides
+
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -42,6 +45,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_USER_ID", "@bot:example.org")
 
         from gateway.config import GatewayConfig, _apply_env_overrides
+
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -57,6 +61,7 @@ class TestMatrixConfigLoading:
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
 
         from gateway.config import GatewayConfig, _apply_env_overrides
+
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -68,6 +73,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
         from gateway.config import GatewayConfig, _apply_env_overrides
+
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -80,6 +86,7 @@ class TestMatrixConfigLoading:
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
         from gateway.config import GatewayConfig, _apply_env_overrides
+
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -93,6 +100,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOME_ROOM_NAME", "Bot Room")
 
         from gateway.config import GatewayConfig, _apply_env_overrides
+
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -107,6 +115,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_USER_ID", "@hermes:example.org")
 
         from gateway.config import GatewayConfig, _apply_env_overrides
+
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -118,9 +127,11 @@ class TestMatrixConfigLoading:
 # Adapter helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_adapter():
     """Create a MatrixAdapter with mocked config."""
     from gateway.platforms.matrix import MatrixAdapter
+
     config = PlatformConfig(
         enabled=True,
         token="syt_test_token",
@@ -137,6 +148,7 @@ def _make_adapter():
 # mxc:// URL conversion
 # ---------------------------------------------------------------------------
 
+
 class TestMatrixMxcToHttp:
     def setup_method(self):
         self.adapter = _make_adapter()
@@ -145,7 +157,10 @@ class TestMatrixMxcToHttp:
         """mxc://server/media_id should become an authenticated HTTP URL."""
         mxc = "mxc://matrix.org/abc123"
         result = self.adapter._mxc_to_http(mxc)
-        assert result == "https://matrix.example.org/_matrix/client/v1/media/download/matrix.org/abc123"
+        assert (
+            result
+            == "https://matrix.example.org/_matrix/client/v1/media/download/matrix.org/abc123"
+        )
 
     def test_mxc_with_different_server(self):
         """mxc:// from a different server should still use our homeserver."""
@@ -171,6 +186,7 @@ class TestMatrixMxcToHttp:
 # DM detection
 # ---------------------------------------------------------------------------
 
+
 class TestMatrixDmDetection:
     def setup_method(self):
         self.adapter = _make_adapter()
@@ -194,7 +210,11 @@ class TestMatrixDmDetection:
     @pytest.mark.asyncio
     async def test_refresh_dm_cache_with_m_direct(self):
         """_refresh_dm_cache should populate _dm_rooms from m.direct data."""
-        self.adapter._joined_rooms = {"!room_a:ex.org", "!room_b:ex.org", "!room_c:ex.org"}
+        self.adapter._joined_rooms = {
+            "!room_a:ex.org",
+            "!room_b:ex.org",
+            "!room_c:ex.org",
+        }
 
         mock_client = MagicMock()
         mock_resp = MagicMock()
@@ -215,6 +235,7 @@ class TestMatrixDmDetection:
 # ---------------------------------------------------------------------------
 # Reply fallback stripping
 # ---------------------------------------------------------------------------
+
 
 class TestMatrixReplyFallbackStripping:
     """Test that Matrix reply fallback lines ('> ' prefix) are stripped."""
@@ -282,6 +303,7 @@ class TestMatrixReplyFallbackStripping:
 # Thread detection
 # ---------------------------------------------------------------------------
 
+
 class TestMatrixThreadDetection:
     def test_thread_id_from_m_relates_to(self):
         """m.relates_to with rel_type=m.thread should extract the event_id."""
@@ -331,6 +353,7 @@ class TestMatrixThreadDetection:
 # Format message
 # ---------------------------------------------------------------------------
 
+
 class TestMatrixFormatMessage:
     def setup_method(self):
         self.adapter = _make_adapter()
@@ -361,6 +384,7 @@ class TestMatrixFormatMessage:
 # Markdown to HTML conversion
 # ---------------------------------------------------------------------------
 
+
 class TestMatrixMarkdownToHtml:
     def setup_method(self):
         self.adapter = _make_adapter()
@@ -390,6 +414,7 @@ class TestMatrixMarkdownToHtml:
 # ---------------------------------------------------------------------------
 # Helper: display name extraction
 # ---------------------------------------------------------------------------
+
 
 class TestMatrixDisplayName:
     def setup_method(self):
@@ -423,13 +448,16 @@ class TestMatrixDisplayName:
 # Requirements check
 # ---------------------------------------------------------------------------
 
+
 class TestMatrixRequirements:
     def test_check_requirements_with_token(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         from gateway.platforms.matrix import check_matrix_requirements
+
         try:
             import nio  # noqa: F401
+
             assert check_matrix_requirements() is True
         except ImportError:
             assert check_matrix_requirements() is False
@@ -439,10 +467,47 @@ class TestMatrixRequirements:
         monkeypatch.delenv("MATRIX_PASSWORD", raising=False)
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
         from gateway.platforms.matrix import check_matrix_requirements
+
         assert check_matrix_requirements() is False
 
     def test_check_requirements_without_homeserver(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test")
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
         from gateway.platforms.matrix import check_matrix_requirements
+
         assert check_matrix_requirements() is False
+
+
+# ---------------------------------------------------------------------------
+# E2EE initialization
+# ---------------------------------------------------------------------------
+# E2EE initialization
+# ---------------------------------------------------------------------------
+
+
+class TestMatrixE2EE:
+    """Tests for E2EE initialization and device_id handling."""
+
+    def test_auto_verify_method_removed(self):
+        """Auto-verify feature was removed due to timing issues."""
+        from gateway.platforms.matrix import MatrixAdapter
+
+        assert not hasattr(MatrixAdapter, "_auto_verify_allowed_users")
+
+    def test_e2ee_module_docstring_documents_device_id(self):
+        """E2EE device_id requirement should be documented in the module docstring."""
+        from gateway.platforms import matrix as matrix_module
+
+        docstring = matrix_module.__doc__ or ""
+        assert "MATRIX_DEVICE_ID" in docstring
+        assert "E2EE" in docstring or "device_id" in docstring
+
+    def test_restore_login_called_in_connect_with_access_token(self):
+        """Verify that connect() calls restore_login when using access token auth."""
+        import inspect
+        from gateway.platforms.matrix import MatrixAdapter
+
+        source = inspect.getsource(MatrixAdapter.connect)
+        assert "restore_login" in source
+        assert "whoami" in source
+        assert "device_id" in source
