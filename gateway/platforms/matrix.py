@@ -286,6 +286,10 @@ class MatrixAdapter(BasePlatformAdapter):
         """Send a message to a Matrix room."""
         import nio
 
+        logger.info(
+            f"Matrix: send called for chat_id={chat_id}, content_len={len(content)}"
+        )
+
         if not content:
             return SendResult(success=True)
 
@@ -327,6 +331,7 @@ class MatrixAdapter(BasePlatformAdapter):
             )
             if isinstance(resp, nio.RoomSendResponse):
                 last_event_id = resp.event_id
+                logger.info(f"Matrix: send successful, event_id={resp.event_id}")
             else:
                 err = getattr(resp, "message", str(resp))
                 logger.error("Matrix: failed to send to %s: %s", chat_id, err)
@@ -609,8 +614,13 @@ class MatrixAdapter(BasePlatformAdapter):
         """Handle incoming text messages (and decrypted megolm events)."""
         import nio
 
+        logger.info(
+            f"Matrix: _on_room_message called: sender={event.sender}, user_id={self._user_id}, type={type(event).__name__}"
+        )
+
         # Ignore own messages.
         if event.sender == self._user_id:
+            logger.info("Matrix: ignoring own message")
             return
 
         # Deduplicate by event ID (nio can fire the same event more than once).
@@ -622,15 +632,20 @@ class MatrixAdapter(BasePlatformAdapter):
         if event_ts and event_ts < self._startup_ts - _STARTUP_GRACE_SECONDS:
             return
 
-        # Handle decrypted MegolmEvents — extract the inner event.
+        # Handle MegolmEvents (encrypted room messages).
+        # nio fires MegolmEvent for encrypted content - after successful decryption
+        # the event still has type MegolmEvent but contains decrypted content.
+        # Only skip if decryption actually failed (indicated by decryption_error attribute).
         if isinstance(event, nio.MegolmEvent):
-            # Failed to decrypt.
-            logger.warning(
-                "Matrix: could not decrypt event %s in %s",
-                event.event_id,
-                room.room_id,
-            )
-            return
+            if getattr(event, "decryption_error", None):
+                logger.warning(
+                    "Matrix: could not decrypt event %s in %s: %s",
+                    event.event_id,
+                    room.room_id,
+                    event.decryption_error,
+                )
+                return
+            # Decryption succeeded - proceed to process the decrypted content
 
         # Skip edits (m.replace relation).
         source_content = getattr(event, "source", {}).get("content", {})
@@ -697,7 +712,9 @@ class MatrixAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to,
         )
 
+        logger.info(f"Matrix: calling handle_message for: {body[:50]}...")
         await self.handle_message(msg_event)
+        logger.info("Matrix: handle_message returned")
 
     async def _on_room_message_media(self, room: Any, event: Any) -> None:
         """Handle incoming media messages (images, audio, video, files)."""
