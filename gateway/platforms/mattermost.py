@@ -580,9 +580,10 @@ class MattermostAdapter(BasePlatformAdapter):
         # For DMs, user_id is sufficient.  For channels, check for @mention.
         message_text = post.get("message", "")
 
-        # Mention-only mode: skip channel messages that don't @mention the bot.
-        # DMs (type "D") are always processed.
-        if channel_type_raw != "D":
+        # Check for @mention if required (DMs always bypass).
+        # Mattermost only: can be disabled via MATTERMOST_REQUIRE_MENTION=false
+        require_mention = os.getenv("MATTERMOST_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no")
+        if channel_type_raw != "D" and require_mention:
             mention_patterns = [
                 f"@{self._bot_username}",
                 f"@{self._bot_user_id}",
