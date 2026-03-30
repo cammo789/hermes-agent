@@ -595,7 +595,7 @@ class MattermostAdapter(BasePlatformAdapter):
 
             free_channels_raw = os.getenv("MATTERMOST_FREE_RESPONSE_CHANNELS", "")
             free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
-            is_free_channel = channel_id in free_channels
+            is_free_channel = "*" in free_channels or channel_id in free_channels
             mention_patterns = [
                 f"@{self._bot_username}",
                 f"@{self._bot_user_id}",
