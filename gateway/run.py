@@ -3596,6 +3596,26 @@ class GatewayRunner:
                 logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
                 return
 
+            # Mattermost doesn't support Opus inline playback — convert to M4A (AAC)
+            # which Mattermost plays inline (confirmed via test on 2026-03-30)
+            platform_name = event.source.platform.value
+            if platform_name == "mattermost" and actual_path.endswith(".ogg"):
+                m4a_path = actual_path[:-4] + ".m4a"
+                conv = subprocess.run(
+                    ["ffmpeg", "-i", actual_path, "-acodec", "aac", "-y",
+                     "-loglevel", "error", m4a_path],
+                    capture_output=True, text=True, timeout=30
+                )
+                if conv.returncode == 0 and os.path.exists(m4a_path):
+                    # Clean up the .ogg since we now have .m4a
+                    try:
+                        os.unlink(actual_path)
+                    except OSError:
+                        pass
+                    actual_path = m4a_path
+                else:
+                    logger.warning("M4A conversion failed for Mattermost, falling back to %s", actual_path)
+
             adapter = self.adapters.get(event.source.platform)
 
             # If connected to a voice channel, play there instead of sending a file
